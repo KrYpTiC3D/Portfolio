@@ -1,59 +1,78 @@
 const CACHE_NAME = 'portfolio-v1';
 const RUNTIME_CACHE = 'portfolio-runtime-v1';
-const ASSETS_TO_CACHE = [
-  '/',
-  '/index.html',
-  '/style.css',
-  '/script.js',
-  '/manifest.json',
-  '/assets/images/logo.webp',
-  '/assets/images/profilepic.webp',
-  '/assets/images/hemas-hospital.webp',
-  '/assets/images/roof-terrace.webp',
-  '/assets/images/holiday-house.webp',
-  '/assets/images/hillside-resort.webp',
-  '/assets/images/carepoint-hospital.webp',
-  '/assets/images/selected-renders.webp',
-  '/assets/images/hero-background.webp',
-  '/assets/icons/favicon.svg',
-  '/assets/icons/apple-touch-icon.webp',
-  '/assets/icons/web-app-manifest-192x192.webp',
-  '/assets/icons/web-app-manifest-512x512.webp',
-  'https://fonts.googleapis.com/css2?family=Montserrat:wght@300;400;700&family=Playfair+Display:wght@700&display=swap'
+
+// Critical shell assets that must be available offline.
+// Uses relative paths so they resolve correctly on GitHub Pages (subpath hosting).
+const CRITICAL_ASSETS = [
+  './',
+  'index.html',
+  'style.css',
+  'script.js'
 ];
 
-// Install event - cache all assets
+// Image assets referenced in HTML — these are .png, not .webp.
+// Cached lazily at runtime; pre-caching here only as a best-effort hint.
+const IMAGE_ASSETS = [
+  'assets/images/logo.png',
+  'assets/images/profilepic.png',
+  'assets/images/hemas-hospital.png',
+  'assets/images/roof-terrace.png',
+  'assets/images/holiday-house.png',
+  'assets/images/hillside-resort.png',
+  'assets/images/carepoint-hospital.png',
+  'assets/images/selected-renders.png'
+];
+
+// ── Install: cache critical shell; best-effort for images ──────────────
+
 self.addEventListener('install', (event) => {
   console.log('Service Worker installing...');
+
   event.waitUntil(
-    caches.open(CACHE_NAME)
-      .then((cache) => {
-        console.log('Caching assets');
-        return cache.addAll(ASSETS_TO_CACHE);
-      })
-      .then(() => self.skipWaiting())
-      .catch((error) => console.error('Cache error:', error))
+    caches.open(CACHE_NAME).then(async (cache) => {
+      // Critical assets — these must all succeed for the shell to work offline.
+      try {
+        await cache.addAll(CRITICAL_ASSETS);
+        console.log('Critical shell cached:', CRITICAL_ASSETS.length, 'assets');
+      } catch (error) {
+        console.error('Failed to cache critical shell:', error);
+        throw error; // Re-throw: without the shell, offline mode is useless.
+      }
+
+      // Image assets — cache what we can; missing files don't kill installation.
+      for (const asset of IMAGE_ASSETS) {
+        try {
+          await cache.add(asset);
+        } catch (error) {
+          console.warn('Skipped caching', asset, '— not found:', error.message);
+        }
+      }
+
+      return self.skipWaiting();
+    })
   );
 });
 
-// Activate event - clean up old caches
+// ── Activate: clean up old caches and claim clients ────────────────────
+
 self.addEventListener('activate', (event) => {
   console.log('Service Worker activating...');
   event.waitUntil(
     caches.keys().then((cacheNames) => {
       return Promise.all(
         cacheNames
-          .filter((cacheName) => cacheName !== CACHE_NAME && cacheName !== RUNTIME_CACHE)
-          .map((cacheName) => {
-            console.log('Deleting old cache:', cacheName);
-            return caches.delete(cacheName);
+          .filter((name) => name !== CACHE_NAME && name !== RUNTIME_CACHE)
+          .map((name) => {
+            console.log('Deleting old cache:', name);
+            return caches.delete(name);
           })
       );
     }).then(() => self.clients.claim())
   );
 });
 
-// Fetch event - cache-first strategy for assets, network-first for others
+// ── Fetch: strategy per resource type ──────────────────────────────────
+
 self.addEventListener('fetch', (event) => {
   const { request } = event;
   const url = new URL(request.url);
@@ -63,46 +82,73 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Skip cross-origin requests (except Google Fonts)
-  if (url.origin !== location.origin && !url.origin.includes('fonts.googleapis.com')) {
+  // Skip cross-origin requests entirely (including Google Fonts).
+  // Let the browser handle its own caching for external resources.
+  if (url.origin !== location.origin) {
     return;
   }
 
-  // Static assets - cache first strategy
-  if (
-    url.pathname.match(/\.(webp|png|jpg|jpeg|svg|css|js|woff|woff2)$/i) ||
-    url.pathname.includes('/assets/')
-  ) {
+  // Images & static assets — cache-first with runtime filling gaps.
+  if (url.pathname.match(/\.(webp|png|jpg|jpeg|svg|css|js|woff|woff2)$/i)) {
     event.respondWith(
-      caches.match(request)
-        .then((response) => response || fetch(request))
-        .catch(() => caches.match('/index.html'))
+      caches.open(RUNTIME_CACHE).then(async (runtimeCache) => {
+        // Check runtime cache first (contains lazily-cached images)
+        let response = await caches.match(request, { cacheName: RUNTIME_CACHE });
+        if (response) return response;
+
+        // Fall back to install-time cache
+        response = await caches.match(request, { cacheName: CACHE_NAME });
+        if (response) return response;
+
+        // Network fetch — cache for next time
+        try {
+          const res = await fetch(request);
+          if (res && res.ok) {
+            runtimeCache.put(request, res.clone());
+          }
+          return res;
+        } catch {
+          // Offline and nothing in cache — return a generic placeholder for images
+          if (url.pathname.match(/\.(png|jpg|jpeg|webp)$/i)) {
+            return new Response(
+              '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 400">' +
+              '<rect width="100%" height="100%" fill="#333"/>' +
+              '<text x="50%" y="50%" text-anchor="middle" fill="#888"' +
+              'font-family="sans-serif" font-size="16">Image unavailable offline</text>' +
+              '</svg>',
+              { headers: { 'Content-Type': 'image/svg+xml' } }
+            );
+          }
+          // For CSS/JS with no cache, return nothing — page won't render perfectly.
+          return new Response(null, { status: 503, statusText: 'Offline' });
+        }
+      })
     );
   }
-  // HTML and API - network first strategy
+
+  // HTML pages & API — network-first, fallback to cached shell.
   else {
     event.respondWith(
       fetch(request)
         .then((response) => {
-          // Cache successful responses
           if (response && response.status === 200) {
-            const responseToCache = response.clone();
+            const clone = response.clone();
             caches.open(RUNTIME_CACHE).then((cache) => {
-              cache.put(request, responseToCache);
+              cache.put(request, clone);
             });
           }
           return response;
         })
         .catch(() => {
-          // Fallback to cache on network error
-          return caches.match(request)
-            .then((response) => response || caches.match('/index.html'));
+          // Offline — serve the cached app shell so the page still loads.
+          return caches.match('index.html');
         })
     );
   }
 });
 
-// Background sync (optional - for future form submissions if needed)
+// ── Background sync (placeholder for future form submissions) ──────────
+
 self.addEventListener('sync', (event) => {
   if (event.tag === 'sync-contact-form') {
     event.waitUntil(syncContactForm());
@@ -111,5 +157,4 @@ self.addEventListener('sync', (event) => {
 
 async function syncContactForm() {
   console.log('Syncing contact form...');
-  // Implement form sync logic here if needed
 }
