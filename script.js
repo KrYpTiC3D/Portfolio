@@ -47,11 +47,36 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.querySelectorAll('.reveal').forEach((el) => observer.observe(el));
 
-    // 4. Simple Form Submission (Prevent refresh)
+    // 4. Async Form Submission (AJAX to Formspree)
     const form = document.getElementById('contact-form');
-    form.addEventListener('submit', (e) => {
+    form.addEventListener('submit', async (e) => {
         e.preventDefault();
-        alert('Thank you, Arfaq will get back to you soon!');
-        form.reset();
+        const formData = new FormData(form);
+        const submitBtn = form.querySelector('button[type="submit"]');
+        submitBtn.textContent = 'Sending...';
+        submitBtn.disabled = true;
+
+        try {
+            const res = await fetch(form.action, {
+                method: 'POST',
+                body: formData,
+                headers: { 'Accept': 'application/json' }
+            });
+            if (res.ok) {
+                alert('Thank you! Your message has been sent. Arfaq will get back to you soon.');
+                form.reset();
+            } else {
+                const errorData = await res.json().catch(() => null);
+                const errMsg = errorData?.errors
+                    ? errorData.errors.map(e => e.message).join(', ')
+                    : 'Something went wrong. Please try again.';
+                alert(errMsg);
+            }
+        } catch {
+            alert('Network error. Please check your connection and try again.');
+        } finally {
+            submitBtn.textContent = 'Send Message';
+            submitBtn.disabled = false;
+        }
     });
 });
